@@ -1,30 +1,63 @@
 from flask import Flask, render_template, request, jsonify
 from docx import Document
+from docx.document import Document as _Document
+from docx.oxml.text.paragraph import CT_P
+from docx.oxml.table import CT_Tbl
+from docx.table import Table
+from docx.text.paragraph import Paragraph
 import re
-from datetime import datetime
 
 app = Flask(__name__)
 
-# Month names for date-pattern fallback (dates without bold)
+# Full and abbreviated month names for date detection
 MONTH_NAMES = (
     'January', 'February', 'March', 'April', 'May', 'June',
     'July', 'August', 'September', 'October', 'November', 'December'
 )
+MONTH_ABBREV = ('Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+                'Jul', 'Aug', 'Sep', 'Sept', 'Oct', 'Nov', 'Dec')
+MONTH_PATTERN = '|'.join(MONTH_NAMES) + '|' + '|'.join(MONTH_ABBREV)
 DATE_PATTERN = re.compile(
-    r'^\**\s*(' + '|'.join(MONTH_NAMES) + r')\s+\d{1,2}(?:\s*[,.]?\s*\d{4})?\s*\**$',
+    r'^\**\s*(' + MONTH_PATTERN + r')\s+\d{1,2}(?:\s*[,.]?\s*\d{4})?\s*\**$',
     re.IGNORECASE
 )
+
+
+def _iter_blocks(parent):
+    """Yield paragraphs and tables in document order (body and inside tables)."""
+    if isinstance(parent, _Document):
+        parent_elm = parent.element.body
+    else:
+        parent_elm = parent._tc  # table cell
+    for child in parent_elm.iterchildren():
+        if isinstance(child, CT_P):
+            yield Paragraph(child, parent)
+        elif isinstance(child, CT_Tbl):
+            yield Table(child, parent)
+
+
+def _iter_all_paragraphs(doc):
+    """Yield every paragraph in document order, including inside tables."""
+    for block in _iter_blocks(doc):
+        if isinstance(block, Paragraph):
+            yield block
+        else:
+            for row in block.rows:
+                for cell in row.cells:
+                    for para in cell.paragraphs:
+                        yield para
 
 
 def parse_birthday_document(file):
     """Parse the uploaded .docx file and extract birthday data.
     Dates can be bold or plain; names listed below each date.
+    Reads from both body paragraphs and table cells.
     """
     doc = Document(file)
     birthdays = {}
     current_date = None
 
-    for para in doc.paragraphs:
+    for para in _iter_all_paragraphs(doc):
         text = para.text.strip()
         if not text:
             continue
@@ -34,7 +67,7 @@ def parse_birthday_document(file):
             para.runs
             and para.runs[0].bold is not False
         )
-        # Treat as date if: first run is bold, or line looks like "Month Day"
+        # Treat as date if: first run is bold, or line looks like "Month Day" / "Mar 2"
         is_date_line = (
             (first_run_bold and re.match(r'\**(.*?)\**', text))
             or DATE_PATTERN.match(text)
@@ -46,7 +79,6 @@ def parse_birthday_document(file):
                 current_date = date_match.group(1).strip() if date_match else text
             else:
                 current_date = text.strip()
-            # Only add non-empty date so we don't create empty rows
             if current_date:
                 birthdays[current_date] = []
         elif current_date:
