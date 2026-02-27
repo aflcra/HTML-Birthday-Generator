@@ -35,13 +35,45 @@ INVISIBLE = re.compile(r'[\u200b\u200c\u200d\ufeff\u00a0]+')
 # Set of month names (full + abbrev) for simple "Month Day" check
 MONTH_SET = {m.lower() for m in MONTH_NAMES} | {m.lower() for m in MONTH_ABBREV}
 
+# Full month names for prefix check (no regex, no split - bulletproof)
+MONTH_PREFIXES = [m.lower() for m in MONTH_NAMES] + [m.lower() for m in MONTH_ABBREV]
+
 
 def _is_date_line(text):
     """True if line looks like 'March 2' or 'Mar 2' (bulletproof fallback)."""
-    parts = text.split()
+    # Normalize: collapse any non-letter/digit to space so "March 2" or "March\u002" both work
+    t = re.sub(r'[^\w\s]', ' ', text)
+    t = ' '.join(t.split())
+    parts = t.split()
     if len(parts) < 2:
         return False
-    return parts[0].lower() in MONTH_SET and parts[1].isdigit() and len(parts[1]) <= 2
+    first, second = parts[0].lower(), parts[1].strip('.,')
+    return first in MONTH_SET and second.isdigit() and 1 <= len(second) <= 2
+
+
+def _is_date_line_simple(text):
+    """Pure string check: line starts with 'March ' or 'Mar ' then 1-2 digits. Returns (is_date, date_label)."""
+    t = _normalize(text).lower()
+    if not t:
+        return False, None
+    for month in MONTH_PREFIXES:
+        prefix = month + ' '
+        if t.startswith(prefix):
+            rest = t[len(prefix):].lstrip()
+            if not rest or not rest[0].isdigit():
+                continue
+            # Take 1-2 digit day
+            day = rest[0]
+            if len(rest) > 1 and rest[1].isdigit():
+                day += rest[1]
+            # Build display date (preserve casing from normalized text)
+            norm = re.sub(r'[^\w\s]', ' ', text)
+            norm = ' '.join(norm.split())
+            p = norm.split()
+            if len(p) >= 2:
+                return True, f"{p[0]} {p[1].strip('.,')}"
+            return True, _normalize(text)
+    return False, None
 
 
 def _normalize(text):
@@ -97,12 +129,17 @@ def parse_birthday_document(file, collect_debug=False):
         if collect_debug:
             debug_lines.append(text[:80])  # first 80 chars per line
 
-        # Bold: can be True or None (inherited from style)
+        # Try simple "March 2" / "Mar 2" check first (no regex, bulletproof)
+        simple_is_date, simple_date_label = _is_date_line_simple(text)
+        if simple_is_date and simple_date_label:
+            current_date = simple_date_label
+            birthdays[current_date] = []
+            continue
+        # Bold or regex date line
         first_run_bold = (
             para.runs
             and para.runs[0].bold is not False
         )
-        # Treat as date if: first run is bold, regex matches, or simple "Month Day" / "Mar 2"
         is_date_line = (
             (first_run_bold and re.match(r'\**(.*?)\**', text))
             or DATE_PATTERN.match(text)
@@ -115,9 +152,11 @@ def parse_birthday_document(file, collect_debug=False):
                 date_match = re.match(r'\**(.*?)\**', text)
                 current_date = _normalize(date_match.group(1) if date_match else text)
             elif _is_date_line(text):
-                # Use first two tokens as "Month Day" (bulletproof)
-                parts = text.split()
-                current_date = f"{parts[0]} {parts[1]}"
+                t = re.sub(r'[^\w\s]', ' ', text)
+                t = ' '.join(t.split())
+                parts = t.split()
+                day = parts[1].strip('.,') if len(parts) > 1 else ''
+                current_date = f"{parts[0]} {day}" if day else text
             else:
                 start_match = DATE_PATTERN_START.match(text)
                 if start_match:
