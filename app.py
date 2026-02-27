@@ -99,7 +99,7 @@ def _iter_blocks(parent):
 
 
 def _iter_all_paragraphs(doc):
-    """Yield every paragraph in document order, including inside tables."""
+    """Yield every paragraph in document order: body (and table cells), then headers/footers."""
     for block in _iter_blocks(doc):
         if isinstance(block, Paragraph):
             yield block
@@ -108,71 +108,77 @@ def _iter_all_paragraphs(doc):
                 for cell in row.cells:
                     for para in cell.paragraphs:
                         yield para
+    for section in doc.sections:
+        for para in section.header.paragraphs:
+            yield para
+        for para in section.footer.paragraphs:
+            yield para
 
 
 def parse_birthday_document(file, collect_debug=False):
     """Parse the uploaded .docx file and extract birthday data.
-    Dates can be bold or plain; names listed below each date.
-    Reads from both body paragraphs and table cells.
-    If collect_debug=True, returns (birthdays, debug_lines) for empty-result debugging.
+    Two-pass: first collect all lines in order and classify date vs name, then group.
     """
     doc = Document(file)
-    birthdays = {}
-    current_date = None
-    leading_names = []  # names seen before any date (handles column/section order)
     debug_lines = [] if collect_debug else None
 
+    # Pass 1: collect (text, date_label or None) in document order
+    items = []
     for para in _iter_all_paragraphs(doc):
         raw = para.text
         text = _normalize(raw)
         if not text:
             continue
-        if collect_debug:
-            debug_lines.append(text[:80])  # first 80 chars per line
-
-        # Try simple "March 2" / "Mar 2" check first (no regex, bulletproof)
         simple_is_date, simple_date_label = _is_date_line_simple(text)
         if simple_is_date and simple_date_label:
-            current_date = simple_date_label
-            birthdays[current_date] = list(leading_names)  # assign any names that appeared before first date
-            leading_names.clear()
+            items.append((text, simple_date_label))
+            if collect_debug:
+                debug_lines.append(f"[DATE] {text[:60]}")
             continue
-        # Bold or regex date line
-        first_run_bold = (
-            para.runs
-            and para.runs[0].bold is not False
-        )
-        is_date_line = (
+        first_run_bold = para.runs and para.runs[0].bold is not False
+        is_date = (
             (first_run_bold and re.match(r'\**(.*?)\**', text))
             or DATE_PATTERN.match(text)
             or DATE_PATTERN_START.match(text)
             or _is_date_line(text)
         )
-
-        if is_date_line:
+        if is_date:
             if first_run_bold and re.match(r'\**(.*?)\**', text):
-                date_match = re.match(r'\**(.*?)\**', text)
-                current_date = _normalize(date_match.group(1) if date_match else text)
+                m = re.match(r'\**(.*?)\**', text)
+                label = _normalize(m.group(1) if m else text)
             elif _is_date_line(text):
                 t = re.sub(r'[^\w\s]', ' ', text)
                 t = ' '.join(t.split())
-                parts = t.split()
-                day = parts[1].strip('.,') if len(parts) > 1 else ''
-                current_date = f"{parts[0]} {day}" if day else text
+                p = t.split()
+                label = f"{p[0]} {p[1].strip('.,')}" if len(p) >= 2 else text
             else:
-                start_match = DATE_PATTERN_START.match(text)
-                if start_match:
-                    current_date = re.sub(r'^\s*\*+\s*|\s*\*+$', '', start_match.group(0)).strip()
-                else:
-                    current_date = text
-            if current_date:
-                birthdays[current_date] = list(leading_names)
-                leading_names.clear()
-        elif current_date:
-            birthdays[current_date].append(text)
+                m = DATE_PATTERN_START.match(text)
+                label = re.sub(r'^\s*\*+\s*|\s*\*+$', '', m.group(0)).strip() if m else text
+            if label:
+                items.append((text, label))
+                if collect_debug:
+                    debug_lines.append(f"[DATE] {text[:60]}")
         else:
-            # No date seen yet; buffer this line to assign to first date (handles names-before-dates order)
-            leading_names.append(text)
+            items.append((text, None))  # name line
+            if collect_debug:
+                debug_lines.append(f"[NAME] {text[:60]}")
+
+    # Pass 2: group names under dates in the order we collected
+    birthdays = {}
+    current_date = None
+    leading = []
+    for text, date_label in items:
+        if date_label is not None:
+            birthdays[date_label] = list(leading)
+            leading.clear()
+            current_date = date_label
+        else:
+            if current_date is not None:
+                birthdays[current_date].append(text)
+            else:
+                leading.append(text)
+    if leading and current_date is not None:
+        birthdays[current_date].extend(leading)
 
     if collect_debug:
         return birthdays, debug_lines
