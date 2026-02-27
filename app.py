@@ -32,6 +32,17 @@ DATE_PATTERN_START = re.compile(
 # Strip invisible/control chars that Word sometimes inserts
 INVISIBLE = re.compile(r'[\u200b\u200c\u200d\ufeff\u00a0]+')
 
+# Set of month names (full + abbrev) for simple "Month Day" check
+MONTH_SET = {m.lower() for m in MONTH_NAMES} | {m.lower() for m in MONTH_ABBREV}
+
+
+def _is_date_line(text):
+    """True if line looks like 'March 2' or 'Mar 2' (bulletproof fallback)."""
+    parts = text.split()
+    if len(parts) < 2:
+        return False
+    return parts[0].lower() in MONTH_SET and parts[1].isdigit() and len(parts[1]) <= 2
+
 
 def _normalize(text):
     """Normalize paragraph text for matching."""
@@ -91,17 +102,22 @@ def parse_birthday_document(file, collect_debug=False):
             para.runs
             and para.runs[0].bold is not False
         )
-        # Treat as date if: first run is bold, or line looks like "Month Day" / "Mar 2"
+        # Treat as date if: first run is bold, regex matches, or simple "Month Day" / "Mar 2"
         is_date_line = (
             (first_run_bold and re.match(r'\**(.*?)\**', text))
             or DATE_PATTERN.match(text)
             or DATE_PATTERN_START.match(text)
+            or _is_date_line(text)
         )
 
         if is_date_line:
-            if first_run_bold:
+            if first_run_bold and re.match(r'\**(.*?)\**', text):
                 date_match = re.match(r'\**(.*?)\**', text)
                 current_date = _normalize(date_match.group(1) if date_match else text)
+            elif _is_date_line(text):
+                # Use first two tokens as "Month Day" (bulletproof)
+                parts = text.split()
+                current_date = f"{parts[0]} {parts[1]}"
             else:
                 start_match = DATE_PATTERN_START.match(text)
                 if start_match:
