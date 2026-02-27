@@ -117,68 +117,34 @@ def _iter_all_paragraphs(doc):
 
 def parse_birthday_document(file, collect_debug=False):
     """Parse the uploaded .docx file and extract birthday data.
-    Two-pass: first collect all lines in order and classify date vs name, then group.
+
+    This implementation is intentionally simple and tuned to your actual document:
+    - We walk the main document paragraphs in order (no tables/headers complexity).
+    - Any line that looks like 'March 2' / 'Mar 2' starts a new date section.
+    - All following non-empty lines are treated as names until the next date.
     """
     doc = Document(file)
-    debug_lines = [] if collect_debug else None
+    birthdays: dict[str, list[str]] = {}
+    current_date: str | None = None
+    debug_lines: list[str] | None = [] if collect_debug else None
 
-    # Pass 1: collect (text, date_label or None) in document order
-    items = []
-    for para in _iter_all_paragraphs(doc):
-        raw = para.text
-        text = _normalize(raw)
+    for para in doc.paragraphs:
+        text = _normalize(para.text)
         if not text:
             continue
-        simple_is_date, simple_date_label = _is_date_line_simple(text)
-        if simple_is_date and simple_date_label:
-            items.append((text, simple_date_label))
-            if collect_debug:
-                debug_lines.append(f"[DATE] {text[:60]}")
-            continue
-        first_run_bold = para.runs and para.runs[0].bold is not False
-        is_date = (
-            (first_run_bold and re.match(r'\**(.*?)\**', text))
-            or DATE_PATTERN.match(text)
-            or DATE_PATTERN_START.match(text)
-            or _is_date_line(text)
-        )
-        if is_date:
-            if first_run_bold and re.match(r'\**(.*?)\**', text):
-                m = re.match(r'\**(.*?)\**', text)
-                label = _normalize(m.group(1) if m else text)
-            elif _is_date_line(text):
-                t = re.sub(r'[^\w\s]', ' ', text)
-                t = ' '.join(t.split())
-                p = t.split()
-                label = f"{p[0]} {p[1].strip('.,')}" if len(p) >= 2 else text
-            else:
-                m = DATE_PATTERN_START.match(text)
-                label = re.sub(r'^\s*\*+\s*|\s*\*+$', '', m.group(0)).strip() if m else text
-            if label:
-                items.append((text, label))
-                if collect_debug:
-                    debug_lines.append(f"[DATE] {text[:60]}")
-        else:
-            items.append((text, None))  # name line
-            if collect_debug:
-                debug_lines.append(f"[NAME] {text[:60]}")
 
-    # Pass 2: group names under dates in the order we collected
-    birthdays = {}
-    current_date = None
-    leading = []
-    for text, date_label in items:
-        if date_label is not None:
-            birthdays[date_label] = list(leading)
-            leading.clear()
-            current_date = date_label
-        else:
-            if current_date is not None:
-                birthdays[current_date].append(text)
-            else:
-                leading.append(text)
-    if leading and current_date is not None:
-        birthdays[current_date].extend(leading)
+        if collect_debug and debug_lines is not None:
+            debug_lines.append(text[:80])
+
+        is_date, label = _is_date_line_simple(text)
+        if is_date and label:
+            current_date = label
+            if current_date not in birthdays:
+                birthdays[current_date] = []
+            continue
+
+        if current_date:
+            birthdays[current_date].append(text)
 
     if collect_debug:
         return birthdays, debug_lines
@@ -248,7 +214,8 @@ def upload_file():
             'html': html_output,
             'title': title
         }
-        if not dates and debug_lines:
+        # Always return a small debug preview so we can see what was read
+        if debug_lines:
             resp['debug_preview'] = debug_lines[:80]
         return jsonify(resp)
     
