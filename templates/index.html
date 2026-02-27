@@ -110,6 +110,12 @@
             
             <h5 class="mt-4">HTML Code:</h5>
             <div id="htmlOutput"></div>
+            
+            <div id="debugSection" class="mt-4" style="display: none;">
+                <h5 class="text-warning">Debug: lines read from document</h5>
+                <p class="text-muted small">If you see "No birthday data found" but your document has dates like March 2, this shows what the parser actually read. Useful for troubleshooting.</p>
+                <pre id="debugPreview" class="bg-dark text-light p-3 rounded small" style="max-height: 200px; overflow: auto;"></pre>
+            </div>
         </div>
     </div>
 
@@ -170,6 +176,16 @@
                     
                     // Show output section
                     outputSection.style.display = 'block';
+                    
+                    // Show debug lines when no data was found (so we can see what was read)
+                    const debugSection = document.getElementById('debugSection');
+                    const debugPreview = document.getElementById('debugPreview');
+                    if (data.debug_preview && data.debug_preview.length > 0) {
+                        debugPreview.textContent = data.debug_preview.map(function(line, i) { return (i + 1) + ': ' + line; }).join('\n');
+                        debugSection.style.display = 'block';
+                    } else {
+                        debugSection.style.display = 'none';
+                    }
                 } else {
                     errorMessage.textContent = data.error || 'An error occurred';
                     errorMessage.style.display = 'block';

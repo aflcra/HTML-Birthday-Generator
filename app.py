@@ -18,10 +18,28 @@ MONTH_NAMES = (
 MONTH_ABBREV = ('Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
                 'Jul', 'Aug', 'Sep', 'Sept', 'Oct', 'Nov', 'Dec')
 MONTH_PATTERN = '|'.join(MONTH_NAMES) + '|' + '|'.join(MONTH_ABBREV)
+# Strict: whole line is "Month Day" or "Mar 2"
 DATE_PATTERN = re.compile(
     r'^\**\s*(' + MONTH_PATTERN + r')\s+\d{1,2}(?:\s*[,.]?\s*\d{4})?\s*\**$',
     re.IGNORECASE
 )
+# Lenient: line starts with "Month Day" (handles trailing/invisible chars)
+DATE_PATTERN_START = re.compile(
+    r'^\s*\**\s*(' + MONTH_PATTERN + r')\s+\d{1,2}(?:\s*[,.]?\s*\d{4})?',
+    re.IGNORECASE
+)
+
+# Strip invisible/control chars that Word sometimes inserts
+INVISIBLE = re.compile(r'[\u200b\u200c\u200d\ufeff\u00a0]+')
+
+
+def _normalize(text):
+    """Normalize paragraph text for matching."""
+    if not text:
+        return ''
+    t = INVISIBLE.sub(' ', text)
+    t = ' '.join(t.split())
+    return t.strip()
 
 
 def _iter_blocks(parent):
@@ -49,19 +67,24 @@ def _iter_all_paragraphs(doc):
                         yield para
 
 
-def parse_birthday_document(file):
+def parse_birthday_document(file, collect_debug=False):
     """Parse the uploaded .docx file and extract birthday data.
     Dates can be bold or plain; names listed below each date.
     Reads from both body paragraphs and table cells.
+    If collect_debug=True, returns (birthdays, debug_lines) for empty-result debugging.
     """
     doc = Document(file)
     birthdays = {}
     current_date = None
+    debug_lines = [] if collect_debug else None
 
     for para in _iter_all_paragraphs(doc):
-        text = para.text.strip()
+        raw = para.text
+        text = _normalize(raw)
         if not text:
             continue
+        if collect_debug:
+            debug_lines.append(text[:80])  # first 80 chars per line
 
         # Bold: can be True or None (inherited from style)
         first_run_bold = (
@@ -72,19 +95,26 @@ def parse_birthday_document(file):
         is_date_line = (
             (first_run_bold and re.match(r'\**(.*?)\**', text))
             or DATE_PATTERN.match(text)
+            or DATE_PATTERN_START.match(text)
         )
 
         if is_date_line:
             if first_run_bold:
                 date_match = re.match(r'\**(.*?)\**', text)
-                current_date = date_match.group(1).strip() if date_match else text
+                current_date = _normalize(date_match.group(1) if date_match else text)
             else:
-                current_date = text.strip()
+                start_match = DATE_PATTERN_START.match(text)
+                if start_match:
+                    current_date = re.sub(r'^\s*\*+\s*|\s*\*+$', '', start_match.group(0)).strip()
+                else:
+                    current_date = text
             if current_date:
                 birthdays[current_date] = []
         elif current_date:
             birthdays[current_date].append(text)
 
+    if collect_debug:
+        return birthdays, debug_lines
     return birthdays
 
 def generate_html(birthdays):
@@ -136,7 +166,8 @@ def upload_file():
     try:
         # Read into a seekable stream so python-docx gets the full file (Flask uploads can be one-read)
         file_stream = BytesIO(file.read())
-        birthdays = parse_birthday_document(file_stream)
+        result = parse_birthday_document(file_stream, collect_debug=True)
+        birthdays, debug_lines = result
         
         # Generate HTML
         html_output = generate_html(birthdays)
@@ -145,11 +176,14 @@ def upload_file():
         dates = [d for d in birthdays.keys() if d]
         title = f"{dates[0]} - {dates[-1]} Birthdays" if dates else "Birthdays"
         
-        return jsonify({
+        resp = {
             'success': True,
             'html': html_output,
             'title': title
-        })
+        }
+        if not dates and debug_lines:
+            resp['debug_preview'] = debug_lines[:80]
+        return jsonify(resp)
     
     except Exception as e:
         return jsonify({'error': f'Error processing file: {str(e)}'}), 500
