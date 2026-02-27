@@ -119,6 +119,7 @@ def parse_birthday_document(file, collect_debug=False):
     doc = Document(file)
     birthdays = {}
     current_date = None
+    leading_names = []  # names seen before any date (handles column/section order)
     debug_lines = [] if collect_debug else None
 
     for para in _iter_all_paragraphs(doc):
@@ -133,7 +134,8 @@ def parse_birthday_document(file, collect_debug=False):
         simple_is_date, simple_date_label = _is_date_line_simple(text)
         if simple_is_date and simple_date_label:
             current_date = simple_date_label
-            birthdays[current_date] = []
+            birthdays[current_date] = list(leading_names)  # assign any names that appeared before first date
+            leading_names.clear()
             continue
         # Bold or regex date line
         first_run_bold = (
@@ -164,9 +166,13 @@ def parse_birthday_document(file, collect_debug=False):
                 else:
                     current_date = text
             if current_date:
-                birthdays[current_date] = []
+                birthdays[current_date] = list(leading_names)
+                leading_names.clear()
         elif current_date:
             birthdays[current_date].append(text)
+        else:
+            # No date seen yet; buffer this line to assign to first date (handles names-before-dates order)
+            leading_names.append(text)
 
     if collect_debug:
         return birthdays, debug_lines
