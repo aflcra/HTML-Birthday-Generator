@@ -1,3 +1,4 @@
+from io import BytesIO
 from flask import Flask, render_template, request, jsonify
 from docx import Document
 from docx.document import Document as _Document
@@ -133,8 +134,9 @@ def upload_file():
         return jsonify({'error': 'Please upload a .docx file'}), 400
     
     try:
-        # Parse the document
-        birthdays = parse_birthday_document(file)
+        # Read into a seekable stream so python-docx gets the full file (Flask uploads can be one-read)
+        file_stream = BytesIO(file.read())
+        birthdays = parse_birthday_document(file_stream)
         
         # Generate HTML
         html_output = generate_html(birthdays)
