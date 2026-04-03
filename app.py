@@ -1,164 +1,82 @@
-from io import BytesIO
 from flask import Flask, render_template, request, jsonify
 from docx import Document
-from docx.document import Document as _Document
-from docx.oxml.text.paragraph import CT_P
-from docx.oxml.table import CT_Tbl
-from docx.table import Table
-from docx.text.paragraph import Paragraph
 import re
+from datetime import datetime
 
 app = Flask(__name__)
 
-# Full and abbreviated month names for date detection
-MONTH_NAMES = (
-    'January', 'February', 'March', 'April', 'May', 'June',
-    'July', 'August', 'September', 'October', 'November', 'December'
-)
-MONTH_ABBREV = ('Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
-                'Jul', 'Aug', 'Sep', 'Sept', 'Oct', 'Nov', 'Dec')
-MONTH_PATTERN = '|'.join(MONTH_NAMES) + '|' + '|'.join(MONTH_ABBREV)
-# Strict: whole line is "Month Day" or "Mar 2"
-DATE_PATTERN = re.compile(
-    r'^\**\s*(' + MONTH_PATTERN + r')\s+\d{1,2}(?:\s*[,.]?\s*\d{4})?\s*\**$',
-    re.IGNORECASE
-)
-# Lenient: line starts with "Month Day" (handles trailing/invisible chars)
-DATE_PATTERN_START = re.compile(
-    r'^\s*\**\s*(' + MONTH_PATTERN + r')\s+\d{1,2}(?:\s*[,.]?\s*\d{4})?',
-    re.IGNORECASE
-)
-
-# Strip invisible/control chars that Word sometimes inserts
-INVISIBLE = re.compile(r'[\u200b\u200c\u200d\ufeff\u00a0]+')
-
-# Set of month names (full + abbrev) for simple "Month Day" check
-MONTH_SET = {m.lower() for m in MONTH_NAMES} | {m.lower() for m in MONTH_ABBREV}
-
-# Full month names for prefix check (no regex, no split - bulletproof)
-MONTH_PREFIXES = [m.lower() for m in MONTH_NAMES] + [m.lower() for m in MONTH_ABBREV]
-
-
-def _is_date_line(text):
-    """True if line looks like 'March 2' or 'Mar 2' (bulletproof fallback)."""
-    # Normalize: collapse any non-letter/digit to space so "March 2" or "March\u002" both work
-    t = re.sub(r'[^\w\s]', ' ', text)
-    t = ' '.join(t.split())
-    parts = t.split()
-    if len(parts) < 2:
-        return False
-    first, second = parts[0].lower(), parts[1].strip('.,')
-    return first in MONTH_SET and second.isdigit() and 1 <= len(second) <= 2
-
-
-def _is_date_line_simple(text):
-    """Pure string check: line starts with 'March ' or 'Mar ' then 1-2 digits. Returns (is_date, date_label)."""
-    t = _normalize(text).lower()
-    if not t:
-        return False, None
-    for month in MONTH_PREFIXES:
-        prefix = month + ' '
-        if t.startswith(prefix):
-            rest = t[len(prefix):].lstrip()
-            if not rest or not rest[0].isdigit():
-                continue
-            # Take 1-2 digit day
-            day = rest[0]
-            if len(rest) > 1 and rest[1].isdigit():
-                day += rest[1]
-            # Build display date (preserve casing from normalized text)
-            norm = re.sub(r'[^\w\s]', ' ', text)
-            norm = ' '.join(norm.split())
-            p = norm.split()
-            if len(p) >= 2:
-                return True, f"{p[0]} {p[1].strip('.,')}"
-            return True, _normalize(text)
-    return False, None
-
-
-def _normalize(text):
-    """Normalize paragraph text for matching."""
-    if not text:
-        return ''
-    t = INVISIBLE.sub(' ', text)
-    t = ' '.join(t.split())
-    return t.strip()
-
-
-def _iter_blocks(parent):
-    """Yield paragraphs and tables in document order (body and inside tables)."""
-    if isinstance(parent, _Document):
-        parent_elm = parent.element.body
-    else:
-        parent_elm = parent._tc  # table cell
-    for child in parent_elm.iterchildren():
-        if isinstance(child, CT_P):
-            yield Paragraph(child, parent)
-        elif isinstance(child, CT_Tbl):
-            yield Table(child, parent)
-
-
-def _iter_all_paragraphs(doc):
-    """Yield every paragraph in document order: body (and table cells), then headers/footers."""
-    for block in _iter_blocks(doc):
-        if isinstance(block, Paragraph):
-            yield block
-        else:
-            for row in block.rows:
-                for cell in row.cells:
-                    for para in cell.paragraphs:
-                        yield para
-    for section in doc.sections:
-        for para in section.header.paragraphs:
-            yield para
-        for para in section.footer.paragraphs:
-            yield para
-
-
-def parse_birthday_document(file, collect_debug=False):
-    """Parse the uploaded .docx file and extract birthday data.
-
-    This implementation is intentionally simple and tuned to your actual document:
-    - We walk the main document paragraphs in order (no tables/headers complexity).
-    - Any line that looks like 'March 2' / 'Mar 2' starts a new date section.
-    - All following non-empty lines are treated as names until the next date.
-    """
-    doc = Document(file)
-    birthdays: dict[str, list[str]] = {}
-    current_date: str | None = None
-    debug_lines: list[str] | None = [] if collect_debug else None
-
+def detect_document_type(doc):
+    """Detect if document is birthdays or service anniversaries"""
     for para in doc.paragraphs:
-        text = _normalize(para.text)
+        text = para.text.strip()
+        if para.runs and para.runs[0].bold:
+            # Check for service anniversary pattern (e.g., "1 year", "5 years")
+            if re.match(r'^\d+\s+years?$', text):
+                return 'service'
+            # Check for birthday pattern (month and day)
+            if re.match(r'^[A-Z][a-z]+\s+\d+$', text):
+                return 'birthday'
+    return 'unknown'
+
+def parse_birthday_document(doc):
+    """Parse birthday document and extract birthday data"""
+    birthdays = {}
+    current_date = None
+    
+    for para in doc.paragraphs:
+        text = para.text.strip()
         if not text:
             continue
-
-        if collect_debug and debug_lines is not None:
-            debug_lines.append(text[:80])
-
-        is_date, label = _is_date_line_simple(text)
-        if is_date and label:
-            current_date = label
-            if current_date not in birthdays:
+            
+        # Check if this is a date header (bold text with date format)
+        if para.runs and para.runs[0].bold:
+            # Extract date from bold text like "September 8"
+            date_match = re.match(r'\**(.*?)\**$', text)
+            if date_match:
+                current_date = date_match.group(1).strip()
                 birthdays[current_date] = []
-            continue
-
-        if current_date:
+        elif current_date:
+            # This is a name under the current date
             birthdays[current_date].append(text)
-
-    if collect_debug:
-        return birthdays, debug_lines
+    
     return birthdays
 
-def generate_html(birthdays):
+def parse_service_document(doc):
+    """Parse service anniversary document and extract data"""
+    sections = {}
+    current_section = None
+    
+    for para in doc.paragraphs:
+        text = para.text.strip()
+        if not text:
+            continue
+            
+        # Check if this is a year header (bold text like "1 year" or "5 years")
+        if para.runs and para.runs[0].bold:
+            year_match = re.match(r'^(\d+)\s+years?$', text)
+            if year_match:
+                current_section = text
+                sections[current_section] = []
+        elif current_section:
+            # This is a name under the current section
+            sections[current_section].append(text)
+    
+    return sections
+
+def split_cols(names):
+    """Split names into 3 columns for service anniversaries"""
+    n = len(names)
+    cols = [[], [], []]
+    per_col = (n + 2) // 3
+    for i, name in enumerate(names):
+        cols[min(i // per_col, 2)].append(name)
+    return cols
+
+def generate_birthday_html(birthdays):
     """Generate Bootstrap HTML from birthday data"""
-    # Ignore empty date keys (avoids empty row with blank h3/p)
-    dates = [d for d in birthdays.keys() if d]
-    if not dates:
-        return '<p class="text-muted">No birthday data found. Use bold dates (e.g. <strong>September 8</strong>) or lines like "September 8" with names listed below each date.</p>'
-
     html_parts = []
-
+    dates = list(birthdays.keys())
+    
     # Process dates in groups of 4 (col-md-3 means 4 columns per row)
     for i in range(0, len(dates), 4):
         html_parts.append('<div class="row">')
@@ -174,6 +92,27 @@ def generate_html(birthdays):
     <h3>{date}<br/></h3>
     <p>{names_html}</p>
   </div>''')
+        
+        html_parts.append('</div>')
+    
+    return '\n'.join(html_parts)
+
+def generate_service_html(sections):
+    """Generate Bootstrap HTML from service anniversary data"""
+    html_parts = []
+    
+    for section, names in sections.items():
+        cols = split_cols(names)
+        html_parts.append(f'<p>\n   <strong>{section}</strong></p>')
+        html_parts.append('<div class="row">')
+        
+        for col in cols:
+            html_parts.append('   <div class="col-md-4">')
+            if col:
+                html_parts.append('      <p>' + '<br/> '.join(col) + '</p>')
+            else:
+                html_parts.append('      <p>&#160;</p>')
+            html_parts.append('   </div>')
         
         html_parts.append('</div>')
     
@@ -197,27 +136,34 @@ def upload_file():
         return jsonify({'error': 'Please upload a .docx file'}), 400
     
     try:
-        # Read into a seekable stream so python-docx gets the full file (Flask uploads can be one-read)
-        file_stream = BytesIO(file.read())
-        result = parse_birthday_document(file_stream, collect_debug=True)
-        birthdays, debug_lines = result
+        # Parse the document
+        doc = Document(file)
         
-        # Generate HTML
-        html_output = generate_html(birthdays)
+        # Detect document type
+        doc_type = detect_document_type(doc)
         
-        # Get date range for title (ignore empty keys)
-        dates = [d for d in birthdays.keys() if d]
-        title = f"{dates[0]} - {dates[-1]} Birthdays" if dates else "Birthdays"
+        # Reset file pointer for re-reading
+        file.seek(0)
+        doc = Document(file)
         
-        resp = {
+        if doc_type == 'birthday':
+            data = parse_birthday_document(doc)
+            html_output = generate_birthday_html(data)
+            dates = list(data.keys())
+            title = f"{dates[0]} - {dates[-1]} Birthdays" if dates else "Birthdays"
+        elif doc_type == 'service':
+            data = parse_service_document(doc)
+            html_output = generate_service_html(data)
+            title = "Service Anniversaries"
+        else:
+            return jsonify({'error': 'Unable to detect document type. Please ensure dates or year headers are in bold.'}), 400
+        
+        return jsonify({
             'success': True,
             'html': html_output,
-            'title': title
-        }
-        # Always return a small debug preview so we can see what was read
-        if debug_lines:
-            resp['debug_preview'] = debug_lines[:80]
-        return jsonify(resp)
+            'title': title,
+            'type': doc_type
+        })
     
     except Exception as e:
         return jsonify({'error': f'Error processing file: {str(e)}'}), 500
