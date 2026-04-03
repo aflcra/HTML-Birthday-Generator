@@ -6,15 +6,19 @@ from datetime import datetime
 app = Flask(__name__)
 
 # Version number
-VERSION = "1.0.0"
+VERSION = "1.0.2"
 
 def detect_document_type(doc):
     """Detect if document is birthdays or service anniversaries"""
-    # First pass - check for patterns regardless of bold
+    # Debug: collect all non-empty paragraphs
+    debug_lines = []
+    
     for para in doc.paragraphs:
         text = para.text.strip()
         if not text:
             continue
+        
+        debug_lines.append(text)
         
         # Check for service anniversary pattern (e.g., "1 year", "5 years")
         if re.match(r'^\d+\s+years?$', text, re.IGNORECASE):
@@ -22,6 +26,11 @@ def detect_document_type(doc):
         # Check for birthday pattern (month and day) - more flexible
         if re.match(r'^[A-Z][a-z]+\s+\d+$', text):
             return 'birthday'
+    
+    # If we get here, log first 10 lines for debugging
+    print("DEBUG - First 10 lines found in document:")
+    for line in debug_lines[:10]:
+        print(f"  '{line}'")
     
     return 'unknown'
 
