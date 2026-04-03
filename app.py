@@ -6,31 +6,27 @@ from datetime import datetime
 app = Flask(__name__)
 
 # Version number
-VERSION = "1.0.2"
+VERSION = "1.0.3"
 
 def detect_document_type(doc):
     """Detect if document is birthdays or service anniversaries"""
-    # Debug: collect all non-empty paragraphs
-    debug_lines = []
-    
+    # Collect all text lines (splitting paragraphs by line breaks)
+    all_lines = []
     for para in doc.paragraphs:
         text = para.text.strip()
-        if not text:
-            continue
-        
-        debug_lines.append(text)
-        
-        # Check for service anniversary pattern (e.g., "1 year", "5 years")
-        if re.match(r'^\d+\s+years?$', text, re.IGNORECASE):
-            return 'service'
-        # Check for birthday pattern (month and day) - more flexible
-        if re.match(r'^[A-Z][a-z]+\s+\d+$', text):
-            return 'birthday'
+        if text:
+            # Split by line breaks within the paragraph
+            lines = text.split('\n')
+            all_lines.extend([line.strip() for line in lines if line.strip()])
     
-    # If we get here, log first 10 lines for debugging
-    print("DEBUG - First 10 lines found in document:")
-    for line in debug_lines[:10]:
-        print(f"  '{line}'")
+    # Check the lines for patterns
+    for line in all_lines:
+        # Check for service anniversary pattern (e.g., "1 year", "5 years")
+        if re.match(r'^\d+\s+years?$', line, re.IGNORECASE):
+            return 'service'
+        # Check for birthday pattern (month and day)
+        if re.match(r'^[A-Z][a-z]+\s+\d+$', line):
+            return 'birthday'
     
     return 'unknown'
 
@@ -39,18 +35,27 @@ def parse_birthday_document(doc):
     dates_data = {}
     current_date = None
     
+    # Process all paragraphs and split by line breaks
     for para in doc.paragraphs:
         text = para.text.strip()
         if not text:
             continue
         
-        # Check if this matches a date pattern like "April 6"
-        if re.match(r'^[A-Z][a-z]+\s+\d+$', text):
-            current_date = text
-            dates_data[current_date] = []
-        elif current_date:
-            # This is a name under the current date
-            dates_data[current_date].append(text)
+        # Split by line breaks within the paragraph
+        lines = text.split('\n')
+        
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+            
+            # Check if this matches a date pattern like "April 6"
+            if re.match(r'^[A-Z][a-z]+\s+\d+$', line):
+                current_date = line
+                dates_data[current_date] = []
+            elif current_date:
+                # This is a name under the current date
+                dates_data[current_date].append(line)
     
     return dates_data
 
@@ -59,19 +64,28 @@ def parse_service_document(doc):
     sections = {}
     current_section = None
     
+    # Process all paragraphs and split by line breaks
     for para in doc.paragraphs:
         text = para.text.strip()
         if not text:
             continue
         
-        # Check if this matches a year pattern like "1 year" or "5 years"
-        year_match = re.match(r'^(\d+)\s+years?$', text, re.IGNORECASE)
-        if year_match:
-            current_section = text
-            sections[current_section] = []
-        elif current_section:
-            # This is a name under the current section
-            sections[current_section].append(text)
+        # Split by line breaks within the paragraph
+        lines = text.split('\n')
+        
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+            
+            # Check if this matches a year pattern like "1 year" or "5 years"
+            year_match = re.match(r'^(\d+)\s+years?$', line, re.IGNORECASE)
+            if year_match:
+                current_section = line
+                sections[current_section] = []
+            elif current_section:
+                # This is a name under the current section
+                sections[current_section].append(line)
     
     return sections
 
